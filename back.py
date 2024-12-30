@@ -1,11 +1,11 @@
 from openai import AsyncAzureOpenAI
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, UploadFile, File
 from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
-import asyncio
 import os
 import json
 import uvicorn
+from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -24,62 +24,67 @@ client = AsyncAzureOpenAI(
     api_version=api_version
 )
 
-# HTML template for the chat interface
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
     <title>Azure OpenAI Chat</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet">
     <style>
-        .chat-container {
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-        }
         .message-container {
-            height: 400px;
-            overflow-y: auto;
-            border: 1px solid #ccc;
-            padding: 10px;
-            margin-bottom: 20px;
+            height: calc(100vh - 220px);
         }
-        .input-container {
-            display: flex;
-            gap: 10px;
+        .file-preview {
+            opacity: 1;
+            transition: opacity 0.3s;
         }
-        #messageInput {
-            flex-grow: 1;
-            padding: 10px;
+        .file-preview:hover .remove-button {
+            opacity: 1;
         }
-        button {
-            padding: 10px 20px;
-            background-color: #4285f4;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-        }
-        .message {
-            margin-bottom: 10px;
-            padding: 5px;
-        }
-        .user-message {
-            background-color: #e3f2fd;
-            border-radius: 5px;
-        }
-        .assistant-message {
-            background-color: #f5f5f5;
-            border-radius: 5px;
+        .remove-button {
+            opacity: 0;
+            transition: opacity 0.3s;
         }
     </style>
 </head>
-<body>
-    <div class="chat-container">
-        <h1>Azure OpenAI Chat</h1>
-        <div id="messages" class="message-container"></div>
-        <div class="input-container">
-            <input type="text" id="messageInput" placeholder="Type your message here...">
-            <button onclick="sendMessage()">Send</button>
+<body class="h-screen flex flex-col bg-white">
+    <!-- Header -->
+    <div class="bg-white border-b p-4">
+        <div class="flex items-center space-x-2">
+            <div class="border p-2 rounded-lg">
+                <span class="font-bold text-xl">AZURE</span>
+                <span class="font-bold text-gray-500 text-xl">CHAT</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chat Messages -->
+    <div id="messages" class="flex-1 overflow-y-auto p-4 message-container"></div>
+
+    <!-- File Previews -->
+    <div id="filePreviewsContainer" class="border-t p-4 hidden">
+        <div id="filePreviews" class="flex gap-4 overflow-x-auto pb-2"></div>
+    </div>
+
+    <!-- Input Area -->
+    <div class="border-t p-4">
+        <div class="flex gap-2">
+            <input type="file" id="fileInput" multiple accept="image/*,.pdf,.doc,.docx,.txt" class="hidden">
+            <button onclick="document.getElementById('fileInput').click()" 
+                    class="p-2 hover:bg-gray-100 rounded-md transition-colors">
+                📎
+            </button>
+            <button onclick="togglePromptsModal()" 
+                    class="p-2 hover:bg-gray-100 rounded-md transition-colors">
+                ✨
+            </button>
+            <input type="text" id="messageInput" 
+                   class="flex-1 px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="Type a message...">
+            <button onclick="sendMessage()" 
+                    class="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors">
+                Send
+            </button>
         </div>
     </div>
 
@@ -87,40 +92,117 @@ HTML_TEMPLATE = """
         const ws = new WebSocket(`ws://${window.location.host}/ws`);
         const messagesDiv = document.getElementById('messages');
         const messageInput = document.getElementById('messageInput');
+        const fileInput = document.getElementById('fileInput');
+        const filePreviewsContainer = document.getElementById('filePreviewsContainer');
+        const filePreviews = document.getElementById('filePreviews');
+        let uploadedFiles = [];
         let currentAssistantMessage = null;
+
+        function getTimeString() {
+            return new Date().toLocaleTimeString();
+        }
+
+        function createMessageElement(message, sender) {
+            const wrapper = document.createElement('div');
+            wrapper.className = `mb-4 flex ${sender === 'user' ? 'justify-end' : 'justify-start'}`;
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `max-w-[70%] ${sender === 'user' ? 'bg-blue-100' : 'bg-gray-100'} rounded-lg p-3`;
+            
+            if (typeof message === 'string') {
+                messageDiv.textContent = message;
+            } else {
+                messageDiv.appendChild(message);
+            }
+
+            // Add timestamp
+            const timestamp = document.createElement('div');
+            timestamp.className = 'text-xs text-gray-500 mt-1';
+            timestamp.textContent = getTimeString();
+            messageDiv.appendChild(timestamp);
+
+            wrapper.appendChild(messageDiv);
+            return wrapper;
+        }
+
+        function handleFileUpload(event) {
+            const files = Array.from(event.target.files);
+            if (files.length === 0) return;
+
+            uploadedFiles = files;
+            updateFilePreviews();
+        }
+
+        function updateFilePreviews() {
+            filePreviews.innerHTML = '';
+            if (uploadedFiles.length === 0) {
+                filePreviewsContainer.classList.add('hidden');
+                return;
+            }
+
+            filePreviewsContainer.classList.remove('hidden');
+            uploadedFiles.forEach((file, index) => {
+                const preview = document.createElement('div');
+                preview.className = 'file-preview relative group';
+                preview.innerHTML = `
+                    <div class="relative w-32 h-32 border rounded-lg overflow-hidden bg-gray-50">
+                        ${file.type.startsWith('image/') 
+                            ? `<img src="${URL.createObjectURL(file)}" class="w-full h-full object-cover">` 
+                            : `<div class="flex flex-col items-center justify-center h-full p-2">
+                                <span class="text-4xl mb-2">📄</span>
+                                <span class="text-xs text-gray-500 text-center truncate w-full">${file.name}</span>
+                               </div>`
+                        }
+                        <button onclick="removeFile(${index})" 
+                                class="remove-button absolute top-1 right-1 p-1 bg-white rounded-full shadow">
+                            ❌
+                        </button>
+                    </div>
+                    <div class="mt-1 text-xs text-gray-500">
+                        <p class="truncate max-w-[128px]">${file.name}</p>
+                        <p>${(file.size / 1024).toFixed(1)} KB</p>
+                    </div>
+                `;
+                filePreviews.appendChild(preview);
+            });
+        }
+
+        function removeFile(index) {
+            uploadedFiles.splice(index, 1);
+            updateFilePreviews();
+        }
 
         ws.onmessage = function(event) {
             const message = JSON.parse(event.data);
             
             if (message.role === 'user') {
-                // Create new user message
-                const messageElement = document.createElement('div');
-                messageElement.className = 'message user-message';
-                messageElement.textContent = `You: ${message.content}`;
+                const messageElement = createMessageElement(message.content, 'user');
                 messagesDiv.appendChild(messageElement);
             } else if (message.role === 'assistant') {
                 if (message.type === 'start') {
-                    // Create new assistant message container
                     currentAssistantMessage = document.createElement('div');
-                    currentAssistantMessage.className = 'message assistant-message';
-                    currentAssistantMessage.textContent = 'Assistant: ';
-                    messagesDiv.appendChild(currentAssistantMessage);
+                    const wrapper = createMessageElement(currentAssistantMessage, 'assistant');
+                    messagesDiv.appendChild(wrapper);
                 } else if (message.type === 'stream') {
-                    // Append to existing message
                     currentAssistantMessage.textContent += message.content;
                 }
             }
             
-            // Scroll to bottom
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         };
 
         function sendMessage() {
             const message = messageInput.value;
-            if (message) {
-                ws.send(message);
-                messageInput.value = '';
-            }
+            if (!message.trim() && uploadedFiles.length === 0) return;
+
+            ws.send(JSON.stringify({
+                text: message,
+                files: uploadedFiles.map(f => ({ name: f.name, size: f.size, type: f.type }))
+            }));
+
+            messageInput.value = '';
+            uploadedFiles = [];
+            updateFilePreviews();
         }
 
         messageInput.addEventListener('keypress', function(e) {
@@ -128,6 +210,8 @@ HTML_TEMPLATE = """
                 sendMessage();
             }
         });
+
+        fileInput.addEventListener('change', handleFileUpload);
     </script>
 </body>
 </html>
@@ -144,12 +228,13 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             # Receive message from client
-            user_message = await websocket.receive_text()
+            data = await websocket.receive_text()
+            message_data = json.loads(data)
             
             # Send user message back to display
             await websocket.send_json({
                 "role": "user",
-                "content": user_message
+                "content": message_data["text"]
             })
 
             # Signal start of assistant response
@@ -162,7 +247,7 @@ async def websocket_endpoint(websocket: WebSocket):
             # Get streaming response from Azure OpenAI
             stream = await client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": user_message}],
+                messages=[{"role": "user", "content": message_data["text"]}],
                 stream=True
             )
 
