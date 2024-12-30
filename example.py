@@ -19,7 +19,7 @@ client = AsyncAzureOpenAI(azure_endpoint = azure_endpoint,
 async def main() -> None:
     stream = await client.chat.completions.create(
         model=model,
-        messages = [ {"role": "user", "content": "What is chatgpt?"} ],
+        messages = [ {"role": "user", "content": "What is a mango?"} ],
         stream=True,
     )
 

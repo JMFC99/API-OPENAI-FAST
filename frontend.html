@@ -1,65 +1,246 @@
-# frontend.html
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>OpenAI Chat Stream</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Azure OpenAI Chat Interface</title>
     <style>
+        /* Modern, clean styling for the chat interface */
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f7f9;
+        }
+
         .chat-container {
             max-width: 800px;
             margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
             padding: 20px;
         }
+
+        .chat-header {
+            text-align: center;
+            margin-bottom: 20px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .chat-messages {
+            min-height: 400px;
+            max-height: 600px;
+            overflow-y: auto;
+            padding: 10px;
+            margin-bottom: 20px;
+        }
+
         .message {
             margin: 10px 0;
-            padding: 10px;
-            border-radius: 5px;
+            padding: 12px 16px;
+            border-radius: 8px;
+            max-width: 80%;
+            position: relative;
         }
+
         .user {
-            background-color: #e3f2fd;
+            background-color: #007AFF;
+            color: white;
+            margin-left: auto;
         }
+
         .assistant {
-            background-color: #f5f5f5;
+            background-color: #f0f0f0;
+            color: #333;
+            margin-right: auto;
         }
+
+        .typing {
+            background-color: #f0f0f0;
+            animation: pulse 2s infinite;
+        }
+
+        .error {
+            background-color: #ffebee;
+            color: #c62828;
+            padding: 10px;
+            border-radius: 8px;
+            margin: 10px 0;
+            display: none;
+        }
+
         .input-container {
-            margin-top: 20px;
             display: flex;
             gap: 10px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
         }
+
         #messageInput {
             flex-grow: 1;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 16px;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+
+        #messageInput:focus {
+            border-color: #007AFF;
+        }
+
+        button {
+            padding: 12px 24px;
+            background-color: #007AFF;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+
+        .status-indicator {
+            font-size: 14px;
+            color: #666;
+            text-align: center;
+            margin: 10px 0;
+            display: none;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        .system-message {
+            text-align: center;
+            color: #666;
+            font-style: italic;
+            margin: 10px 0;
+        }
+
+        /* Markdown-style code formatting */
+        .message pre {
+            background-color: rgba(0, 0, 0, 0.05);
             padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+            margin: 10px 0;
+        }
+
+        .message code {
+            font-family: 'Courier New', Courier, monospace;
+            padding: 2px 4px;
+            background-color: rgba(0, 0, 0, 0.05);
+            border-radius: 3px;
         }
     </style>
 </head>
 <body>
     <div class="chat-container">
-        <div id="chatMessages"></div>
+        <div class="chat-header">
+            <h1>Azure OpenAI Chat</h1>
+        </div>
+        <div id="errorDisplay" class="error"></div>
+        <div id="statusIndicator" class="status-indicator"></div>
+        <div id="chatMessages" class="chat-messages"></div>
         <div class="input-container">
-            <input type="text" id="messageInput" placeholder="Type your message...">
-            <button onclick="sendMessage()">Send</button>
+            <input type="text" id="messageInput" placeholder="Type your message here..." 
+                   onkeypress="if(event.key === 'Enter') sendMessage()">
+            <button onclick="sendMessage()" id="sendButton">Send</button>
         </div>
     </div>
 
     <script>
         let messages = [];
         let currentResponse = '';
-        
+        let isProcessing = false;
+
+        // Initialize the chat with a system message
+        window.onload = () => {
+            displaySystemMessage('Chat initialized. You can start the conversation.');
+            checkServerHealth();
+        };
+
+        // Check server health status
+        async function checkServerHealth() {
+            try {
+                const response = await fetch('http://localhost:8000/health');
+                const data = await response.json();
+                if (data.status !== 'healthy') {
+                    showError('Server is not responding properly. Please try again later.');
+                }
+            } catch (error) {
+                showError('Cannot connect to server. Please check if the server is running.');
+            }
+        }
+
+        function displaySystemMessage(content) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'system-message';
+            messageDiv.textContent = content;
+            document.getElementById('chatMessages').appendChild(messageDiv);
+            scrollToBottom();
+        }
+
+        function showError(message) {
+            const errorDisplay = document.getElementById('errorDisplay');
+            errorDisplay.textContent = message;
+            errorDisplay.style.display = 'block';
+            setTimeout(() => {
+                errorDisplay.style.display = 'none';
+            }, 5000);
+        }
+
+        function updateStatus(message) {
+            const statusIndicator = document.getElementById('statusIndicator');
+            statusIndicator.textContent = message;
+            statusIndicator.style.display = message ? 'block' : 'none';
+        }
+
+        function toggleInputState(disabled) {
+            document.getElementById('messageInput').disabled = disabled;
+            document.getElementById('sendButton').disabled = disabled;
+            isProcessing = disabled;
+        }
+
         async function sendMessage() {
+            if (isProcessing) return;
+
             const input = document.getElementById('messageInput');
             const userMessage = input.value.trim();
             if (!userMessage) return;
 
-            // Add user message to chat
-            messages.push({ role: 'user', content: userMessage });
-            displayMessage('user', userMessage);
-            input.value = '';
-
-            // Create message container for streaming response
-            const responseContainer = document.createElement('div');
-            responseContainer.className = 'message assistant';
-            document.getElementById('chatMessages').appendChild(responseContainer);
-
             try {
+                toggleInputState(true);
+                updateStatus('Connecting to Azure OpenAI...');
+
+                // Add user message to chat
+                messages.push({ role: 'user', content: userMessage });
+                displayMessage('user', userMessage);
+                input.value = '';
+
+                // Create message container for streaming response
+                const responseContainer = document.createElement('div');
+                responseContainer.className = 'message assistant typing';
+                document.getElementById('chatMessages').appendChild(responseContainer);
+
                 const response = await fetch('http://localhost:8000/chat', {
                     method: 'POST',
                     headers: {
@@ -69,6 +250,10 @@
                         messages: messages
                     })
                 });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
 
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
@@ -92,9 +277,15 @@
                                 if (parsed.content) {
                                     currentResponse += parsed.content;
                                     responseContainer.textContent = currentResponse;
+                                    scrollToBottom();
+                                }
+                                if (parsed.error) {
+                                    throw new Error(parsed.error);
                                 }
                             } catch (e) {
-                                console.error('Error parsing chunk:', e);
+                                if (e.message !== "Unexpected end of JSON input") {
+                                    showError(`Error processing response: ${e.message}`);
+                                }
                             }
                         }
                     }
@@ -103,11 +294,17 @@
                 // Add completed response to messages array
                 if (currentResponse) {
                     messages.push({ role: 'assistant', content: currentResponse });
+                    responseContainer.classList.remove('typing');
                 }
 
             } catch (error) {
-                console.error('Error:', error);
-                responseContainer.textContent = 'Error: Failed to get response';
+                showError(`Error: ${error.message}`);
+                const lastMessage = document.querySelector('.typing');
+                if (lastMessage) lastMessage.remove();
+            } finally {
+                toggleInputState(false);
+                updateStatus('');
+                scrollToBottom();
             }
         }
 
@@ -116,6 +313,12 @@
             messageDiv.className = `message ${role}`;
             messageDiv.textContent = content;
             document.getElementById('chatMessages').appendChild(messageDiv);
+            scrollToBottom();
+        }
+
+        function scrollToBottom() {
+            const chatMessages = document.getElementById('chatMessages');
+            chatMessages.scrollTop = chatMessages.scrollHeight;
         }
     </script>
 </body>

@@ -1,38 +1,41 @@
 # backend.py
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from openai import OpenAI,AzureOpenAI
-import json
-import asyncio
+from openai import AsyncAzureOpenAI
 from pydantic import BaseModel
 from typing import List
-import os
-
 from dotenv import load_dotenv
+import json
+import asyncio
 import os
+import time
+from datetime import datetime, timedelta
+from collections import deque
 
 load_dotenv()
 
-# Initialize FastAPI app
 app = FastAPI()
 
-
-# Add CORS middleware to allow frontend connections
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with your frontend domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Azure OpenAI configuration
+azure_endpoint = os.getenv("ENDPOINT")
+api_key = os.getenv("API_KEY")
+model = os.getenv("MODEL_NAME")
+api_version = os.getenv("API_VERSION")
 
-# Initialize OpenAI client
-client = AzureOpenAI(
-  api_key = os.getenv("API_KEY"),  
-  api_version = "2024-08-01-preview",
-  azure_endpoint = os.getenv("ENDPOINT")
+# Initialize Azure OpenAI client
+client = AsyncAzureOpenAI(
+    azure_endpoint=azure_endpoint,
+    api_key=api_key,
+    api_version=api_version
 )
 
 class Message(BaseModel):
@@ -42,26 +45,54 @@ class Message(BaseModel):
 class ChatRequest(BaseModel):
     messages: List[Message]
 
+# Rate limiting configuration
+RATE_LIMIT = 6  # requests per second
+TIME_WINDOW = 1  # second
+request_timestamps = deque(maxlen=RATE_LIMIT)
+request_semaphore = asyncio.Semaphore(RATE_LIMIT)
+
+async def wait_for_rate_limit():
+    """Implements the rate limiting logic"""
+    current_time = time.time()
+    
+    # Remove timestamps older than our time window
+    while request_timestamps and current_time - request_timestamps[0] > TIME_WINDOW:
+        request_timestamps.popleft()
+    
+    # If we've hit our rate limit, wait until we can make another request
+    if len(request_timestamps) >= RATE_LIMIT:
+        wait_time = request_timestamps[0] + TIME_WINDOW - current_time
+        if wait_time > 0:
+            await asyncio.sleep(wait_time)
+    
+    # Add current timestamp to our queue
+    request_timestamps.append(current_time)
+
 async def generate_stream_response(messages):
     try:
-        # Create streaming response from OpenAI
-        stream = client.chat.completions.create(
-            model="gpt-4",
-            messages=[{"role": m.role, "content": m.content} for m in messages],
-            stream=True
-        )
+        async with request_semaphore:
+            await wait_for_rate_limit()
+            
+            stream = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": m.role, "content": m.content} for m in messages],
+                stream=True
+            )
 
-        # Process each chunk from the stream
-        for chunk in stream:
-            if chunk.choices[0].delta.content is not None:
-                # Format the chunk as a Server-Sent Event
-                yield f"data: {json.dumps({'content': chunk.choices[0].delta.content})}\n\n"
-            await asyncio.sleep(0)  # Allow other tasks to run
+            async for chunk in stream:
+                if hasattr(chunk.choices[0].delta, 'content') and chunk.choices[0].delta.content is not None:
+                    yield f"data: {json.dumps({'content': chunk.choices[0].delta.content})}\n\n"
+                elif chunk.choices[0].finish_reason == "stop":
+                    yield "data: [DONE]\n\n"
+                
+                await asyncio.sleep(0)
 
-        # Send completion message
-        yield "data: [DONE]\n\n"
+    except asyncio.TimeoutError:
+        yield f"data: {json.dumps({'error': 'Request timed out due to high traffic. Please try again.'})}\n\n"
     except Exception as e:
-        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        error_message = f"Error: {str(e)}"
+        print(f"Backend error: {error_message}")
+        yield f"data: {json.dumps({'error': error_message})}\n\n"
 
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
@@ -69,3 +100,40 @@ async def chat_endpoint(request: ChatRequest):
         generate_stream_response(request.messages),
         media_type="text/event-stream"
     )
+
+@app.get("/health")
+async def health_check():
+    try:
+        current_requests = len(request_timestamps)
+        status = {
+            "status": "healthy",
+            "service": "Azure OpenAI Chat API",
+            "current_requests": current_requests,
+            "rate_limit": RATE_LIMIT,
+            "time_window": TIME_WINDOW,
+            "available_slots": RATE_LIMIT - current_requests
+        }
+        return status
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "current_requests": len(request_timestamps)
+        }
+
+@app.get("/metrics")
+async def get_metrics():
+    """Endpoint to monitor rate limiting metrics"""
+    current_time = time.time()
+    active_requests = sum(1 for t in request_timestamps if current_time - t <= TIME_WINDOW)
+    
+    return {
+        "active_requests": active_requests,
+        "rate_limit": RATE_LIMIT,
+        "time_window_seconds": TIME_WINDOW,
+        "available_capacity": RATE_LIMIT - active_requests
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
