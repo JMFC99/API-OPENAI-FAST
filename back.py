@@ -1,6 +1,5 @@
 from openai import AsyncAzureOpenAI
 from fastapi import FastAPI, WebSocket
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 import asyncio
@@ -24,8 +23,6 @@ client = AsyncAzureOpenAI(
     api_key=api_key,
     api_version=api_version
 )
-
-# Initialize FastAPI app
 
 # HTML template for the chat interface
 HTML_TEMPLATE = """
@@ -62,6 +59,18 @@ HTML_TEMPLATE = """
             border-radius: 4px;
             cursor: pointer;
         }
+        .message {
+            margin-bottom: 10px;
+            padding: 5px;
+        }
+        .user-message {
+            background-color: #e3f2fd;
+            border-radius: 5px;
+        }
+        .assistant-message {
+            background-color: #f5f5f5;
+            border-radius: 5px;
+        }
     </style>
 </head>
 <body>
@@ -78,12 +87,31 @@ HTML_TEMPLATE = """
         const ws = new WebSocket(`ws://${window.location.host}/ws`);
         const messagesDiv = document.getElementById('messages');
         const messageInput = document.getElementById('messageInput');
+        let currentAssistantMessage = null;
 
         ws.onmessage = function(event) {
             const message = JSON.parse(event.data);
-            const messageElement = document.createElement('div');
-            messageElement.textContent = `${message.role}: ${message.content}`;
-            messagesDiv.appendChild(messageElement);
+            
+            if (message.role === 'user') {
+                // Create new user message
+                const messageElement = document.createElement('div');
+                messageElement.className = 'message user-message';
+                messageElement.textContent = `You: ${message.content}`;
+                messagesDiv.appendChild(messageElement);
+            } else if (message.role === 'assistant') {
+                if (message.type === 'start') {
+                    // Create new assistant message container
+                    currentAssistantMessage = document.createElement('div');
+                    currentAssistantMessage.className = 'message assistant-message';
+                    currentAssistantMessage.textContent = 'Assistant: ';
+                    messagesDiv.appendChild(currentAssistantMessage);
+                } else if (message.type === 'stream') {
+                    // Append to existing message
+                    currentAssistantMessage.textContent += message.content;
+                }
+            }
+            
+            // Scroll to bottom
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         };
 
@@ -124,30 +152,34 @@ async def websocket_endpoint(websocket: WebSocket):
                 "content": user_message
             })
 
-            # Get response from Azure OpenAI
+            # Signal start of assistant response
+            await websocket.send_json({
+                "role": "assistant",
+                "type": "start",
+                "content": ""
+            })
+
+            # Get streaming response from Azure OpenAI
             stream = await client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": user_message}],
                 stream=True
             )
 
-            # Stream the response
-            full_response = ""
+            # Stream each chunk as it arrives
             async for chunk in stream:
-                print(chunk)
                 if len(chunk.choices)>0:
+                    print(chunk.choices)
                     if chunk.choices[0].delta.content:
-                        full_response += chunk.choices[0].delta.content
-            
-            # Send complete response
-            await websocket.send_json({
-                "role": "assistant",
-                "content": full_response
-            })
-            
+                        await websocket.send_json({
+                            "role": "assistant",
+                            "type": "stream",
+                            "content": chunk.choices[0].delta.content
+                        })
+                
     except Exception as e:
         print(f"Error: {e}")
         await websocket.close()
 
 if __name__ == "__main__":
-    uvicorn.run("back:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
