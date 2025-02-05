@@ -1,0 +1,21 @@
+{
+  "Quick Help": [
+    {
+      "id": 1,
+      "title": "Technical Issue",
+      "text": "I need help with [issue]. When I [action], [problem] occurs."
+    },
+    {
+      "id": 2,
+      "title": "Feature Request",
+      "text": "I would like to request a new feature: [description]"
+    }
+  ],
+  "Documentation": [
+    {
+      "id": 3,
+      "title": "Find Docs",
+      "text": "Where can I find documentation about [topic]?"
+    }
+  ]
+}
